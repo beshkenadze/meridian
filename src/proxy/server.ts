@@ -1,7 +1,8 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { query } from "@anthropic-ai/claude-agent-sdk"
-import PQueue from "p-queue"
+// p-queue removed: with maxTurns: 1, each request is a single API call
+// and concurrent requests (e.g., subagents) must not block each other
 import type { Context } from "hono"
 import type { ProxyConfig } from "./types"
 import { DEFAULT_PROXY_CONFIG } from "./types"
@@ -13,8 +14,7 @@ import { join, dirname } from "path"
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
 
-// Queue to serialize Claude Agent SDK queries and avoid ~60s delay on concurrent requests
-const requestQueue = new PQueue({ concurrency: 1 })
+// No request queue — with maxTurns: 1, concurrent requests are safe
 
 function resolveClaudeExecutable(): string {
   // 1. Try the SDK's bundled cli.js (same dir as this module's SDK)
@@ -414,48 +414,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
   app.post("/v1/messages", (c) => {
     const requestId = c.req.header("x-request-id") || randomUUID()
-    const queueEnteredAt = Date.now()
-    claudeLog("queue.enter", {
-      requestId,
-      endpoint: "/v1/messages",
-      queueSize: requestQueue.size,
-      queuePending: requestQueue.pending
-    })
-
-    return requestQueue.add(() => {
-      const queueStartedAt = Date.now()
-      claudeLog("queue.start", {
-        requestId,
-        endpoint: "/v1/messages",
-        queueSize: requestQueue.size,
-        queuePending: requestQueue.pending,
-        queueWaitMs: queueStartedAt - queueEnteredAt
-      })
-      return handleMessages(c, { requestId, endpoint: "/v1/messages", queueEnteredAt, queueStartedAt })
-    })
+    const startedAt = Date.now()
+    claudeLog("request.enter", { requestId, endpoint: "/v1/messages" })
+    return handleMessages(c, { requestId, endpoint: "/v1/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
   })
 
   app.post("/messages", (c) => {
     const requestId = c.req.header("x-request-id") || randomUUID()
-    const queueEnteredAt = Date.now()
-    claudeLog("queue.enter", {
-      requestId,
-      endpoint: "/messages",
-      queueSize: requestQueue.size,
-      queuePending: requestQueue.pending
-    })
-
-    return requestQueue.add(() => {
-      const queueStartedAt = Date.now()
-      claudeLog("queue.start", {
-        requestId,
-        endpoint: "/messages",
-        queueSize: requestQueue.size,
-        queuePending: requestQueue.pending,
-        queueWaitMs: queueStartedAt - queueEnteredAt
-      })
-      return handleMessages(c, { requestId, endpoint: "/messages", queueEnteredAt, queueStartedAt })
-    })
+    const startedAt = Date.now()
+    claudeLog("request.enter", { requestId, endpoint: "/messages" })
+    return handleMessages(c, { requestId, endpoint: "/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
   })
 
   return { app, config: finalConfig }
