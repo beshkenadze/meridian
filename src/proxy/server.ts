@@ -20,6 +20,8 @@ import { buildAgentDefinitions } from "./agentDefs"
 import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
 import { lookupSharedSession, storeSharedSession, clearSharedSessions } from "./sessionStore"
 import { LRUMap } from "../utils/lruMap"
+import { telemetryStore, createTelemetryRoutes } from "../telemetry"
+import type { RequestMetric } from "../telemetry"
 
 // --- Session Tracking ---
 // Maps OpenCode session ID (or fingerprint) → Claude SDK session ID
@@ -808,12 +810,31 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             claudeLog("response.fallback_used", { mode: "non_stream", reason: "no_content_blocks" })
           }
 
+          const totalDurationMs = Date.now() - requestStartAt
+
           claudeLog("response.completed", {
             mode: "non_stream",
             model,
-            durationMs: Date.now() - requestStartAt,
+            durationMs: totalDurationMs,
             contentBlocks: contentBlocks.length,
             hasToolUse
+          })
+
+          telemetryStore.record({
+            requestId: requestMeta.requestId,
+            timestamp: Date.now(),
+            model,
+            mode: "non-stream",
+            isResume,
+            isPassthrough: passthrough,
+            status: 200,
+            queueWaitMs: requestMeta.queueStartedAt - requestMeta.queueEnteredAt,
+            ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
+            upstreamDurationMs: Date.now() - upstreamStartAt,
+            totalDurationMs,
+            contentBlocks: contentBlocks.length,
+            textEvents: 0,
+            error: null,
           })
 
           // Store session for future resume
@@ -1108,13 +1129,32 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                   durationMs: Date.now() - requestStartAt
                 })
 
+                const streamTotalDurationMs = Date.now() - requestStartAt
+
                 claudeLog("response.completed", {
                   mode: "stream",
                   model,
-                  durationMs: Date.now() - requestStartAt,
+                  durationMs: streamTotalDurationMs,
                   streamEventsSeen,
                   eventsForwarded,
                   textEventsForwarded
+                })
+
+                telemetryStore.record({
+                  requestId: requestMeta.requestId,
+                  timestamp: Date.now(),
+                  model,
+                  mode: "stream",
+                  isResume,
+                  isPassthrough: passthrough,
+                  status: 200,
+                  queueWaitMs: requestMeta.queueStartedAt - requestMeta.queueEnteredAt,
+                  ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
+                  upstreamDurationMs: Date.now() - upstreamStartAt,
+                  totalDurationMs: streamTotalDurationMs,
+                  contentBlocks: eventsForwarded,
+                  textEvents: textEventsForwarded,
+                  error: null,
                 })
 
                 if (textEventsForwarded === 0) {
@@ -1181,6 +1221,24 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         const classified = classifyError(errMsg)
 
         claudeLog("proxy.error", { error: errMsg, classified: classified.type })
+
+        telemetryStore.record({
+          requestId: requestMeta.requestId,
+          timestamp: Date.now(),
+          model: "unknown",
+          mode: "non-stream",
+          isResume: false,
+          isPassthrough: Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH),
+          status: classified.status,
+          queueWaitMs: requestMeta.queueStartedAt - requestMeta.queueEnteredAt,
+          ttfbMs: null,
+          upstreamDurationMs: Date.now() - requestStartAt,
+          totalDurationMs: Date.now() - requestStartAt,
+          contentBlocks: 0,
+          textEvents: 0,
+          error: classified.type,
+        })
+
         return new Response(
           JSON.stringify({ type: "error", error: { type: classified.type, message: classified.message } }),
           { status: classified.status, headers: { "Content-Type": "application/json" } }
@@ -1204,6 +1262,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
   app.post("/v1/messages", (c) => handleWithQueue(c, "/v1/messages"))
   app.post("/messages", (c) => handleWithQueue(c, "/messages"))
+
+  // Telemetry dashboard and API
+  app.route("/telemetry", createTelemetryRoutes())
 
   // Health check endpoint — verifies auth status
   app.get("/health", async (c) => {
