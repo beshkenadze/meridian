@@ -4,8 +4,9 @@ import { serve } from "@hono/node-server"
 import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
-import type { ProxyConfig } from "./types"
 import { DEFAULT_PROXY_CONFIG } from "./types"
+import type { ProxyConfig, ProxyInstance } from "./types"
+export type { ProxyConfig, ProxyInstance }
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
 import { existsSync } from "fs"
@@ -104,15 +105,19 @@ export function clearSessionCache() {
 
 // Clean stale sessions every hour — sessions survive a full workday
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, val] of sessionCache) {
-    if (now - val.lastAccess > SESSION_TTL_MS) sessionCache.delete(key)
-  }
-  for (const [key, val] of fingerprintCache) {
-    if (now - val.lastAccess > SESSION_TTL_MS) fingerprintCache.delete(key)
-  }
-}, 60 * 60 * 1000)
+export function startSessionCleanup(): ReturnType<typeof setInterval> {
+  return setInterval(() => {
+    const now = Date.now()
+    for (const [key, val] of sessionCache) {
+      if (now - val.lastAccess > SESSION_TTL_MS) sessionCache.delete(key)
+    }
+    for (const [key, val] of fingerprintCache) {
+      if (now - val.lastAccess > SESSION_TTL_MS) fingerprintCache.delete(key)
+    }
+  }, 60 * 60 * 1000)
+}
+
+// No module-level timer — cleanup is started per instance in startProxyServer()
 
 /** Hash the first user message + system context to fingerprint a conversation.
  *  Including system context prevents cross-project collisions when different
@@ -1367,7 +1372,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
   return { app, config: finalConfig }
 }
 
-export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
+export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promise<ProxyInstance> {
   claudeExecutable = await resolveClaudeExecutableAsync()
   const { app, config: finalConfig } = createProxyServer(config)
 
@@ -1376,27 +1381,39 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
     port: finalConfig.port,
     hostname: finalConfig.host,
   }, (info) => {
-    console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
-    console.log(`\nTo use with OpenCode, run:`)
-    console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
+    if (!finalConfig.silent) {
+      console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
+      console.log(`\nTo use with OpenCode, run:`)
+      console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
+    }
   }) as Server
 
   const idleMs = finalConfig.idleTimeoutSeconds * 1000
   server.keepAliveTimeout = idleMs
   server.headersTimeout = idleMs + 1000
 
+  // Start a dedicated cleanup timer for this instance
+  const cleanupTimer = startSessionCleanup()
+
   server.on("error", (error: NodeJS.ErrnoException) => {
-    if (error.code === "EADDRINUSE") {
+    if (error.code === "EADDRINUSE" && !finalConfig.silent) {
       console.error(`\nError: Port ${finalConfig.port} is already in use.`)
       console.error(`\nIs another instance of the proxy already running?`)
       console.error(`  Check with: lsof -i :${finalConfig.port}`)
       console.error(`  Kill it with: kill $(lsof -ti :${finalConfig.port})`)
       console.error(`\nOr use a different port:`)
       console.error(`  CLAUDE_PROXY_PORT=4567 claude-max-proxy`)
-      process.exit(1)
     }
-    throw error
   })
 
-  return server
+  return {
+    server,
+    config: finalConfig,
+    async close() {
+      clearInterval(cleanupTimer)
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()))
+      })
+    },
+  }
 }

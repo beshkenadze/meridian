@@ -8,7 +8,8 @@
     "claude-max-proxy": "./dist/cli.js"
   },
   "exports": {
-    ".": "./dist/server.js"
+    ".": "./dist/server.js",
+    "./types": "./dist/types.js"
   },
   "engines": {
     "node": ">=22"
