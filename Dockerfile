@@ -38,7 +38,6 @@ EXPOSE 3456
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD node -e "const r=await fetch('http://127.0.0.1:3456/health');process.exit(r.ok?0:1)"
 
-ENV CLAUDE_PROXY_PASSTHROUGH=1 \
-    CLAUDE_PROXY_HOST=0.0.0.0
+ENV CLAUDE_PROXY_HOST=0.0.0.0
 ENTRYPOINT ["./bin/docker-entrypoint.sh"]
 CMD ["./bin/claude-proxy-supervisor.sh"]
