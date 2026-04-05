@@ -3,6 +3,7 @@ export { diagnosticLog, MemoryDiagnosticLogStore, DiagnosticLogStore } from "./l
 export { createTelemetryRoutes } from "./routes"
 export { landingHtml } from "./landing"
 export { computePercentiles, computeSummary } from "./percentiles"
+export { renderPrometheusMetrics } from "./prometheus"
 export type {
   RequestMetric,
   TelemetrySummary,
