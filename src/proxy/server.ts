@@ -11,12 +11,11 @@ export type { ProxyConfig, ProxyInstance, ProxyServer }
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
-
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
 import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
 
-import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
+import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
 import { classifyError, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
@@ -194,6 +193,7 @@ function checkTokenHealth(
 
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
   const finalConfig = { ...DEFAULT_PROXY_CONFIG, ...config }
+  const serverVersion = finalConfig.version ?? "unknown"
 
   // Restore persisted active profile from last session
   restoreActiveProfile(finalConfig.profiles)
@@ -213,7 +213,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         status: "ok",
         service: "meridian",
         format: "anthropic",
-        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/models", "/telemetry", "/health"]
+        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/models", "/telemetry", "/metrics", "/health"]
       })
     }
     return c.html(landingHtml)
@@ -1711,6 +1711,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // Telemetry dashboard and API
   app.route("/telemetry", createTelemetryRoutes())
 
+  // Prometheus metrics endpoint
+  app.get("/metrics", (c) => {
+    const body = renderPrometheusMetrics(telemetryStore)
+    return c.body(body, 200, {
+      "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+    })
+  })
+
   // Health check endpoint — verifies auth status
   app.get("/health", async (c) => {
     try {
@@ -1724,6 +1732,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       if (!auth) {
         return c.json({
           status: "degraded",
+          version: serverVersion,
           error: "Could not verify auth status",
           mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
         })
@@ -1731,12 +1740,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       if (!auth.loggedIn) {
         return c.json({
           status: "unhealthy",
+          version: serverVersion,
           error: "Not logged in. Run: claude login",
           auth: { loggedIn: false }
         }, 503)
       }
       return c.json({
         status: "healthy",
+        version: serverVersion,
         auth: {
           loggedIn: true,
           email: auth.email,
@@ -1748,6 +1759,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     } catch {
       return c.json({
         status: "degraded",
+        version: serverVersion,
         error: "Could not verify auth status",
         mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
       })
